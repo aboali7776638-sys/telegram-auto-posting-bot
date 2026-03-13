@@ -136,7 +136,8 @@ app.add_handler(MessageHandler(
     filters.TEXT | filters.PHOTO | filters.VIDEO | filters.VOICE,
     publish
 ))
-
+from keep_alive import keep_alive
+keep_alive()
 print("Bot started...")
 
 # تشغيل البوت

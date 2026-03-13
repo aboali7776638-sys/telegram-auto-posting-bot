@@ -1,144 +1,173 @@
 import json
 import os
+from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from keep_alive import keep_alive
+import asyncio
 
-TOKEN = "8328657209:AAGGdgjcX0-FIN4GtBjw9cW62YCQmtpGw2M"  # ضع التوكن هنا
+# ==== إعدادات ====
+TOKEN = "8328657209:AAGGdgjcX0-FIN4GtBjw9cW62YCQmtpGw2M"  # توكن البوت
+DATA_FILE = "data.json"          # ملف البيانات
+DEFAULT_DAILY_LIMIT = 5          # العدد الافتراضي للمنشورات يومياً
 
-DATA_FILE = "data.json"  # ملف لحفظ البيانات
-
-
-# تحميل البيانات من ملف JSON
+# ==== تحميل وحفظ البيانات ====
 def load_data():
     if not os.path.exists(DATA_FILE):
         return {}
     with open(DATA_FILE, "r") as f:
         return json.load(f)
 
-
-# حفظ البيانات إلى ملف JSON
 def save_data(data):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f)
 
-
-# تحميل البيانات عند تشغيل البوت
 data = load_data()
 
-
-# استقبال الأمر /start
+# ==== /start ====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "اهلا بك في بوت النشر التلقائي\n\n"
-        "1- أضف البوت مشرف في قناتك\n"
-        "2- اربط القناة:\n"
-        "/setchannel @channel\n\n"
-        "بعدها ارسل نص أو صورة أو فيديو أو صوت وسيتم نشره في قناتك."
+        "🤖 أهلاً بك في بوت النشر التلقائي!\n\n"
+        "📋 الأوامر المتاحة:\n\n"
+        "1️⃣ /setchannel @channel — ربط قناتك\n"
+        "2️⃣ /setschedule N — تحديد عدد المنشورات يومياً\n"
+        "3️⃣ /queue — عرض حالة قائمة الانتظار\n"
+        "4️⃣ /clearqueue — مسح قائمة الانتظار\n\n"
+        "📌 بعد الإعداد، أرسل لي النصوص أو الصور أو الفيديوهات أو الصوتيات وسأخزنها وأنشرها تلقائياً!"
     )
 
-
-# ربط القناة مع البوت
+# ==== /setchannel ====
 async def setchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
-
     if len(context.args) == 0:
         await update.message.reply_text("اكتب اسم القناة هكذا:\n/setchannel @channel")
         return
-
     channel = context.args[0]
-
     if user_id not in data:
-        data[user_id] = {"posts": []}
-
-    data[user_id]["channel"] = channel
-
+        data[user_id] = {"channel": channel, "queue": [], "posts": [], "daily_count": 0, "last_post_date": ""}
+    else:
+        data[user_id]["channel"] = channel
     save_data(data)
+    await update.message.reply_text(f"✅ تم ربط القناة {channel} بنجاح!")
 
-    await update.message.reply_text("تم ربط القناة بنجاح ✅")
-
-
-# نشر المحتوى في القناة
-async def publish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ==== /setschedule ====
+async def setschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
+    if len(context.args) == 0 or not context.args[0].isdigit():
+        await update.message.reply_text("اكتب العدد بشكل صحيح: /setschedule 3")
+        return
+    daily_limit = int(context.args[0])
+    if user_id not in data:
+        data[user_id] = {"channel": "", "queue": [], "posts": [], "daily_count": 0, "last_post_date": "", "daily_limit": daily_limit}
+    else:
+        data[user_id]["daily_limit"] = daily_limit
+    save_data(data)
+    await update.message.reply_text(f"✅ تم تحديد {daily_limit} منشورات يومياً لك.")
 
-    if user_id not in data or "channel" not in data[user_id]:
-        await update.message.reply_text("قم بربط قناتك أولا:\n/setchannel @channel")
+# ==== /queue ====
+async def show_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    if user_id not in data or not data[user_id].get("queue"):
+        await update.message.reply_text("✅ قائمة الانتظار فارغة.")
+        return
+    queue = data[user_id]["queue"]
+    text = "\n".join([f"{i+1}. {item['type']}" for i, item in enumerate(queue)])
+    await update.message.reply_text(f"📋 قائمة الانتظار:\n{text}")
+
+# ==== /clearqueue ====
+async def clear_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    if user_id in data:
+        data[user_id]["queue"] = []
+        save_data(data)
+    await update.message.reply_text("✅ تم مسح قائمة الانتظار.")
+
+# ==== إضافة منشور إلى قائمة الانتظار ====
+async def add_to_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    if user_id not in data or "channel" not in data[user_id] or not data[user_id]["channel"]:
+        await update.message.reply_text("قم بربط قناتك أولاً: /setchannel @channel")
         return
 
-    channel = data[user_id]["channel"]
+    post = None
+    post_type = None
 
-    post_id = None
-
-    # نشر النصوص
     if update.message.text:
-        post_id = update.message.text
-
-        if post_id in data[user_id]["posts"]:
-            await update.message.reply_text("هذا المنشور تم نشره مسبقًا ❌")
-            return
-
-        await context.bot.send_message(channel, update.message.text)
-
-    # نشر الصور
+        post = update.message.text
+        post_type = "text"
     elif update.message.photo:
-        post_id = update.message.photo[-1].file_id
-
-        if post_id in data[user_id]["posts"]:
-            await update.message.reply_text("تم نشر هذه الصورة سابقًا ❌")
-            return
-
-        await context.bot.send_photo(
-            channel,
-            update.message.photo[-1].file_id,
-            caption=update.message.caption
-        )
-
-    # نشر الفيديوهات
+        post = update.message.photo[-1].file_id
+        post_type = "photo"
     elif update.message.video:
-        post_id = update.message.video.file_id
-
-        if post_id in data[user_id]["posts"]:
-            await update.message.reply_text("تم نشر هذا الفيديو سابقًا ❌")
-            return
-
-        await context.bot.send_video(
-            channel,
-            update.message.video.file_id,
-            caption=update.message.caption
-        )
-
-    # نشر الصوت
+        post = update.message.video.file_id
+        post_type = "video"
     elif update.message.voice:
-        post_id = update.message.voice.file_id
+        post = update.message.voice.file_id
+        post_type = "voice"
+    else:
+        await update.message.reply_text("❌ نوع محتوى غير مدعوم.")
+        return
 
-        if post_id in data[user_id]["posts"]:
-            await update.message.reply_text("تم نشر هذا الصوت سابقًا ❌")
-            return
+    # تحقق من التكرار
+    if any(item["content"] == post for item in data[user_id]["queue"]):
+        await update.message.reply_text("❌ هذا المحتوى موجود بالفعل في قائمة الانتظار.")
+        return
 
-        await context.bot.send_voice(channel, update.message.voice.file_id)
+    data[user_id]["queue"].append({"type": post_type, "content": post})
+    save_data(data)
+    await update.message.reply_text("✅ تم إضافة المنشور إلى قائمة الانتظار.")
 
-    if post_id:
-        data[user_id]["posts"].append(post_id)
-        save_data(data)
+# ==== دالة النشر التلقائي ====
+async def scheduled_publisher():
+    while True:
+        for user_id, info in data.items():
+            # إعادة تعيين عداد اليوم إذا تغير اليوم
+            today = datetime.now().strftime("%Y-%m-%d")
+            if info.get("last_post_date") != today:
+                info["daily_count"] = 0
+                info["last_post_date"] = today
 
-        await update.message.reply_text("تم نشر المنشور في قناتك ✅")
+            # عدد المنشورات اليومية المحدد
+            daily_limit = info.get("daily_limit", DEFAULT_DAILY_LIMIT)
 
+            # النشر من قائمة الانتظار حتى الوصول للحد اليومي
+            while info["queue"] and info["daily_count"] < daily_limit:
+                post = info["queue"].pop(0)
+                channel = info["channel"]
+                try:
+                    if post["type"] == "text":
+                        await bot.send_message(channel, post["content"])
+                    elif post["type"] == "photo":
+                        await bot.send_photo(channel, post["content"])
+                    elif post["type"] == "video":
+                        await bot.send_video(channel, post["content"])
+                    elif post["type"] == "voice":
+                        await bot.send_voice(channel, post["content"])
+                    info["posts"].append(post["content"])
+                    info["daily_count"] += 1
+                    save_data(data)
+                except Exception as e:
+                    print(f"Error sending post for {user_id}: {e}")
+        await asyncio.sleep(60)  # تحقق كل دقيقة
 
-# بناء البوت
+# ==== بناء التطبيق ====
 app = ApplicationBuilder().token(TOKEN).build()
+bot = app.bot  # للوصول للبوت داخل scheduled_publisher
 
-# إضافة المعالجات للأوامر المختلفة
+# ==== إضافة المعالجات ====
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("setchannel", setchannel))
+app.add_handler(CommandHandler("setschedule", setschedule))
+app.add_handler(CommandHandler("queue", show_queue))
+app.add_handler(CommandHandler("clearqueue", clear_queue))
+app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.VOICE, add_to_queue))
 
-# إضافة معالج لرسائل النصوص والصور والفيديو والصوت
-app.add_handler(MessageHandler(
-    filters.TEXT | filters.PHOTO | filters.VIDEO | filters.VOICE,
-    publish
-))
-from keep_alive import keep_alive
+# ==== تشغيل keep_alive ====
 keep_alive()
-print("Bot started...")
 
-# تشغيل البوت
-app.run_polling()
+# ==== تشغيل البوت + جدولة النشر ====
+async def main():
+    asyncio.create_task(scheduled_publisher())
+    await app.run_polling()
+
+asyncio.run(main())

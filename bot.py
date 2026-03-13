@@ -5,6 +5,10 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from keep_alive import keep_alive
 import asyncio
+import nest_asyncio
+
+# ==== إصلاح مشكلة event loop على Railway ====
+nest_asyncio.apply()
 
 # ==== إعدادات ====
 TOKEN = "8328657209:AAGGdgjcX0-FIN4GtBjw9cW62YCQmtpGw2M"  # توكن البوت
@@ -44,7 +48,7 @@ async def setchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     channel = context.args[0]
     if user_id not in data:
-        data[user_id] = {"channel": channel, "queue": [], "posts": [], "daily_count": 0, "last_post_date": ""}
+        data[user_id] = {"channel": channel, "queue": [], "posts": [], "daily_count": 0, "last_post_date": "", "daily_limit": DEFAULT_DAILY_LIMIT}
     else:
         data[user_id]["channel"] = channel
     save_data(data)
@@ -108,7 +112,6 @@ async def add_to_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ نوع محتوى غير مدعوم.")
         return
 
-    # تحقق من التكرار
     if any(item["content"] == post for item in data[user_id]["queue"]):
         await update.message.reply_text("❌ هذا المحتوى موجود بالفعل في قائمة الانتظار.")
         return
@@ -121,16 +124,13 @@ async def add_to_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def scheduled_publisher():
     while True:
         for user_id, info in data.items():
-            # إعادة تعيين عداد اليوم إذا تغير اليوم
             today = datetime.now().strftime("%Y-%m-%d")
             if info.get("last_post_date") != today:
                 info["daily_count"] = 0
                 info["last_post_date"] = today
 
-            # عدد المنشورات اليومية المحدد
             daily_limit = info.get("daily_limit", DEFAULT_DAILY_LIMIT)
 
-            # النشر من قائمة الانتظار حتى الوصول للحد اليومي
             while info["queue"] and info["daily_count"] < daily_limit:
                 post = info["queue"].pop(0)
                 channel = info["channel"]
@@ -148,11 +148,11 @@ async def scheduled_publisher():
                     save_data(data)
                 except Exception as e:
                     print(f"Error sending post for {user_id}: {e}")
-        await asyncio.sleep(60)  # تحقق كل دقيقة
+        await asyncio.sleep(60)
 
 # ==== بناء التطبيق ====
 app = ApplicationBuilder().token(TOKEN).build()
-bot = app.bot  # للوصول للبوت داخل scheduled_publisher
+bot = app.bot
 
 # ==== إضافة المعالجات ====
 app.add_handler(CommandHandler("start", start))
@@ -170,4 +170,5 @@ async def main():
     asyncio.create_task(scheduled_publisher())
     await app.run_polling()
 
-asyncio.run(main())
+# التشغيل النهائي بدون مشاكل event loop
+asyncio.get_event_loop().run_until_complete(main())
